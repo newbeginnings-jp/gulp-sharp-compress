@@ -1,42 +1,42 @@
 # gulp-sharp-compress
 
-High-quality image compression for Gulp using [sharp](https://sharp.pixelplumbing.com/). Drop-in replacement for `gulp-imagemin` with better performance.
+[sharp](https://sharp.pixelplumbing.com/) を使った高品質な画像圧縮の Gulp プラグインです。`gulp-imagemin` のドロップイン代替として、より高速に動作します。
 
-Uses the same codecs as TinyPNG (mozjpeg for JPEG, palette quantization for PNG) plus WebP and AVIF support.
+TinyPNG と同系統のコーデック（JPEG は mozjpeg、PNG はパレット量子化による減色）に加え、WebP / AVIF への変換にも対応します。
 
-## Install
+## インストール
 
 ```bash
 npm install gulp-sharp-compress
 ```
 
-## Usage
+## 使い方
 
 ```js
 import gulp from 'gulp';
 import compress, { webp, avif } from 'gulp-sharp-compress';
 
-// Default: compress in original format
+// デフォルト: 元のフォーマットのまま圧縮
 gulp.src('src/images/**/*.{jpg,png}', { encoding: false })
     .pipe(compress({ quality: 80 }))
     .pipe(gulp.dest('dist/images'));
 
-// Convert to WebP
+// WebP に変換
 gulp.src('src/images/**/*.{jpg,png}', { encoding: false })
     .pipe(webp({ quality: 80 }))
     .pipe(gulp.dest('dist/images'));
 
-// Convert to AVIF
+// AVIF に変換
 gulp.src('src/images/**/*.{jpg,png}', { encoding: false })
     .pipe(avif({ quality: 60 }))
     .pipe(gulp.dest('dist/images'));
 ```
 
-**Important:** Gulp 5 requires `{ encoding: false }` for binary files.
+**重要:** Gulp 5 ではバイナリファイルに `{ encoding: false }` が必要です。
 
-## Programmatic API (without Gulp)
+## プログラマティック API（Gulp なしで使う）
 
-You don't need Gulp. `compressBuffer` compresses a single image `Buffer` and works in any Node script, serverless function, or other build tool. It accepts the same options.
+Gulp は必須ではありません。`compressBuffer` は画像の `Buffer` を1枚圧縮する関数で、任意の Node スクリプト・サーバーレス関数・他のビルドツールで動作します。オプションは Gulp 版と同じです。
 
 ```js
 import { readFile, writeFile } from 'node:fs/promises';
@@ -44,50 +44,50 @@ import { compressBuffer } from 'gulp-sharp-compress';
 
 const input = await readFile('photo.png');
 
-// Same-format compression
+// 同じフォーマットのまま圧縮
 const { data, originalSize, compressedSize } = await compressBuffer(input, { quality: 80 });
 await writeFile('photo.min.png', data);
 
-// Convert to AVIF
+// AVIF に変換
 const avif = await compressBuffer(input, { format: 'avif', quality: 60 });
 await writeFile('photo.avif', avif.data);
 ```
 
-`compressBuffer(input, options)` resolves to `{ data, format, originalSize, compressedSize, skipped }`. `skipped` is `true` when same-format re-encoding would have made the file larger (then `data` is the original buffer). Auto-orientation, metadata handling, resizing and validation all behave exactly as in the Gulp pipeline.
+`compressBuffer(input, options)` は `{ data, format, originalSize, compressedSize, skipped }` を返します。`skipped` は、同じフォーマットでの再エンコードでファイルがかえって大きくなる場合に `true` になります（そのとき `data` は元の Buffer です）。向きの自動補正・メタデータ処理・リサイズ・バリデーションは、すべて Gulp パイプラインとまったく同じ挙動です。
 
-## Options
+## オプション
 
-| Option | Type | Default | Description |
+| オプション | 型 | デフォルト | 説明 |
 |--------|------|---------|-------------|
-| `quality` | number | `80` | Compression quality (1-100, clamped) |
-| `format` | string | `'original'` | Output format: `'original'`, `'jpeg'`, `'png'`, `'webp'`, `'avif'`, `'gif'` |
-| `maxWidth` | number | `0` | Max width in px (0 = no resize) |
-| `maxHeight` | number | `0` | Max height in px (0 = no resize) |
-| `progressive` | boolean | `true` | Progressive JPEG |
-| `stripMetadata` | boolean | `true` | Remove EXIF/GPS metadata (orientation is auto-applied first, see below) |
-| `keepIccProfile` | boolean | `false` | Keep the ICC colour profile even when stripping metadata |
-| `pngEffort` | number | `4` | PNG compression effort (1-10) |
-| `avifLossless` | boolean | `false` | AVIF lossless mode |
-| `failOnError` | boolean | `false` | Emit a `PluginError` on unreadable images instead of passing them through |
-| `silent` | boolean | `false` | Suppress log output |
+| `quality` | number | `80` | 圧縮品質（1〜100、範囲外はクランプ） |
+| `format` | string | `'original'` | 出力フォーマット: `'original'`, `'jpeg'`, `'png'`, `'webp'`, `'avif'`, `'gif'` |
+| `maxWidth` | number | `0` | 最大幅（px、`0` でリサイズなし） |
+| `maxHeight` | number | `0` | 最大高さ（px、`0` でリサイズなし） |
+| `progressive` | boolean | `true` | プログレッシブ JPEG |
+| `stripMetadata` | boolean | `true` | EXIF/GPS などのメタデータを除去（先に向きを画素へ焼き込みます。下記参照） |
+| `keepIccProfile` | boolean | `false` | メタデータ除去時も ICC カラープロファイルは残す |
+| `pngEffort` | number | `4` | PNG 圧縮の処理強度（1〜10） |
+| `avifLossless` | boolean | `false` | AVIF ロスレスモード |
+| `failOnError` | boolean | `false` | 読み込めない画像をそのまま通さず `PluginError` を発生させる |
+| `silent` | boolean | `false` | ログ出力を抑制 |
 
-## Behavior & notes
+## 挙動と注意点
 
-- **Orientation is preserved.** Images are auto-rotated from their EXIF orientation before encoding, so portrait photos stay upright even though `stripMetadata` (default `true`) removes the orientation tag.
-- **Colour profiles.** Stripping metadata also drops the ICC profile. For wide-gamut/colour-critical images, set `keepIccProfile: true`.
-- **Animated GIF / WebP.** Multi-frame inputs are read with all frames intact (no flattening to the first frame). Converting an animated source to a still format (e.g. PNG) will still flatten it. Because `.webp` may be animated, static WebP files skip EXIF auto-rotation — convert to JPEG first if you need a static WebP auto-oriented. For GIF output, `quality` (1-100) is mapped to the GIF palette size (`colours`, 2-256).
-- **Format conversion can collide.** Converting `logo.png` and `logo.jpg` in the same folder to WebP both produce `logo.webp`; the second overwrites the first at `gulp.dest`. The plugin logs a `⚠ … collides …` warning when this happens — keep distinct basenames or output to separate folders.
-- **`failOnError` and Gulp error handling.** With `failOnError: true` the plugin emits a `PluginError`. As with any Gulp plugin, errors do not stop the build unless you handle them — add `.on('error', …)` or use `gulp-plumber`. With the default `failOnError: false`, unreadable files are logged and passed through untouched so one bad asset never breaks the build.
+- **向きは保持されます。** エンコード前に EXIF の向き情報を画素へ自動適用するため、`stripMetadata`（デフォルト `true`）で向きタグが消えても、縦向きの写真が横倒しになりません。
+- **カラープロファイル。** メタデータを除去すると ICC プロファイルも失われます。広色域・色が重要な画像では `keepIccProfile: true` を指定してください。
+- **アニメーション GIF / WebP。** 複数フレームの入力は全フレームを保持します（先頭1枚に潰しません）。アニメーション素材を静止画フォーマット（例: PNG）へ変換した場合は1枚に統合されます。`.webp` はアニメーションの可能性があるため、静止 WebP は EXIF の自動回転をスキップします（自動補正したい場合は一度 JPEG に変換してください）。GIF 出力では `quality`（1〜100）が GIF のパレット色数（`colours`、2〜256）にマッピングされます。
+- **フォーマット変換時の名前衝突。** 同じフォルダの `logo.png` と `logo.jpg` をどちらも WebP に変換すると、両方が `logo.webp` になり、`gulp.dest` で後者が前者を上書きします。この場合プラグインは `⚠ … collides …` の警告を出します。ベース名を分けるか、出力先フォルダを分けてください。
+- **`failOnError` と Gulp のエラー処理。** `failOnError: true` のときはプラグインが `PluginError` を発生させます。Gulp プラグイン一般の挙動として、エラーをハンドリングしない限りビルドは止まりません（`.on('error', …)` を付けるか `gulp-plumber` を使ってください）。デフォルトの `failOnError: false` では、読み込めないファイルはログを出してそのまま素通しするため、1枚の不良ファイルでビルド全体が壊れることはありません。
 
-## Codecs
+## コーデック
 
-| Format | Codec | Equivalent |
+| フォーマット | コーデック | 相当するもの |
 |--------|-------|------------|
-| JPEG | mozjpeg | TinyPNG, Squoosh |
-| PNG | palette quantization | pngquant |
+| JPEG | mozjpeg | TinyPNG / Squoosh |
+| PNG | パレット量子化（減色） | pngquant |
 | WebP | libwebp | cwebp |
 | AVIF | libaom | avifenc |
 
-## License
+## ライセンス
 
 MIT
