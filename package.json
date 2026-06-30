@@ -1,0 +1,57 @@
+{
+  "name": "gulp-sharp-compress",
+  "version": "1.0.0",
+  "description": "High-quality image compression for Gulp using sharp (mozjpeg/libwebp/oxipng/AVIF). Drop-in replacement for gulp-imagemin with better performance.",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "type": "module",
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "prepublishOnly": "node --test"
+  },
+  "keywords": [
+    "gulp",
+    "gulp-plugin",
+    "gulpplugin",
+    "image",
+    "compress",
+    "optimize",
+    "sharp",
+    "mozjpeg",
+    "webp",
+    "avif",
+    "png",
+    "pngquant",
+    "tinypng",
+    "image-compress",
+    "imagemin"
+  ],
+  "author": "株式会社NewBeginnings <info@new-beginnings.co.jp>",
+  "license": "MIT",
+  "homepage": "https://github.com/newbeginnings-jp/gulp-sharp-compress#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/newbeginnings-jp/gulp-sharp-compress.git"
+  },
+  "bugs": {
+    "url": "https://github.com/newbeginnings-jp/gulp-sharp-compress/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "gulp": ">=4.0.0"
+  },
+  "dependencies": {
+    "sharp": "^0.35.0",
+    "through2": "^4.0.2",
+    "plugin-error": "^2.0.1",
+    "fancy-log": "^2.0.0"
+  }
+}
