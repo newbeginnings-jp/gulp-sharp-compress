@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import compress, { webp, avif, jpeg, png } from '../index.js';
+import compress, { webp, avif, jpeg, png, compressBuffer } from '../index.js';
 
 // A 256x256 RGB gradient compresses well and decodes in every codec.
 async function makeFixturePng() {
@@ -142,4 +142,39 @@ test('out-of-range quality is clamped, not crashed', async () => {
   assert.ok(out.contents.length > 0, 'still produces a valid JPEG');
   assert.equal(out.contents[0], 0xff, 'JPEG SOI byte 1');
   assert.equal(out.contents[1], 0xd8, 'JPEG SOI byte 2');
+});
+
+// --- Programmatic API: compressBuffer (usable outside Gulp) ---
+
+test('compressBuffer compresses a PNG buffer and returns metadata', async () => {
+  const input = await makeFixturePng();
+  const res = await compressBuffer(input, { quality: 80 });
+  assert.ok(Buffer.isBuffer(res.data), 'returns a Buffer in .data');
+  assert.equal(res.format, 'png', 'keeps original format');
+  assert.equal(res.originalSize, input.length);
+  assert.equal(res.compressedSize, res.data.length);
+});
+
+test('compressBuffer converts to WebP when format is set', async () => {
+  const input = await makeFixturePng();
+  const res = await compressBuffer(input, { format: 'webp', quality: 80 });
+  assert.equal(res.format, 'webp');
+  assert.equal(res.data.subarray(0, 4).toString('ascii'), 'RIFF');
+  assert.equal(res.data.subarray(8, 12).toString('ascii'), 'WEBP');
+});
+
+test('compressBuffer auto-orients from EXIF', async () => {
+  const input = await makeOrientedJpeg(); // 200x100, orientation=6
+  const res = await compressBuffer(input, { quality: 80 });
+  const meta = await sharp(res.data).metadata();
+  assert.equal(meta.width, 100, 'short side after auto-orient');
+  assert.equal(meta.height, 200, 'long side after auto-orient');
+});
+
+test('compressBuffer rejects non-Buffer input', async () => {
+  await assert.rejects(() => compressBuffer('not a buffer'), /Buffer/);
+});
+
+test('compressBuffer rejects an unsupported input format', async () => {
+  await assert.rejects(() => compressBuffer(Buffer.from('plain text, not an image')));
 });

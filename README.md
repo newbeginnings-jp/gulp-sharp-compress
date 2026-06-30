@@ -34,6 +34,27 @@ gulp.src('src/images/**/*.{jpg,png}', { encoding: false })
 
 **Important:** Gulp 5 requires `{ encoding: false }` for binary files.
 
+## Programmatic API (without Gulp)
+
+You don't need Gulp. `compressBuffer` compresses a single image `Buffer` and works in any Node script, serverless function, or other build tool. It accepts the same options.
+
+```js
+import { readFile, writeFile } from 'node:fs/promises';
+import { compressBuffer } from 'gulp-sharp-compress';
+
+const input = await readFile('photo.png');
+
+// Same-format compression
+const { data, originalSize, compressedSize } = await compressBuffer(input, { quality: 80 });
+await writeFile('photo.min.png', data);
+
+// Convert to AVIF
+const avif = await compressBuffer(input, { format: 'avif', quality: 60 });
+await writeFile('photo.avif', avif.data);
+```
+
+`compressBuffer(input, options)` resolves to `{ data, format, originalSize, compressedSize, skipped }`. `skipped` is `true` when same-format re-encoding would have made the file larger (then `data` is the original buffer). Auto-orientation, metadata handling, resizing and validation all behave exactly as in the Gulp pipeline.
+
 ## Options
 
 | Option | Type | Default | Description |

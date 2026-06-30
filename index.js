@@ -2,6 +2,8 @@
 // High-quality image compression for Gulp using sharp.
 // Uses mozjpeg (JPEG), palette quantization (PNG), libwebp (WebP), libaom (AVIF).
 // Drop-in replacement for gulp-imagemin with better performance.
+//
+// Also usable outside Gulp via the programmatic compressBuffer() API.
 
 import through2 from 'through2';
 import sharp from 'sharp';
@@ -40,6 +42,7 @@ const DEFAULTS = {
     silent: false,
 };
 
+// File extension -> output format (Gulp path).
 const FORMAT_MAP = {
     '.jpg': 'jpeg',
     '.jpeg': 'jpeg',
@@ -49,6 +52,17 @@ const FORMAT_MAP = {
     '.gif': 'gif', // keep as GIF so animation is preserved (was flattened to PNG before)
     '.tiff': 'jpeg',
     '.tif': 'jpeg',
+};
+
+// sharp metadata.format -> output format (programmatic path, when format is 'original').
+const INPUT_FORMAT_MAP = {
+    jpeg: 'jpeg',
+    png: 'png',
+    webp: 'webp',
+    avif: 'avif',
+    heif: 'avif',
+    gif: 'gif',
+    tiff: 'jpeg',
 };
 
 const EXT_MAP = {
@@ -62,6 +76,7 @@ const EXT_MAP = {
 // Inputs that may carry multiple frames — read with { animated: true } so we
 // don't silently drop all but the first frame.
 const ANIMATED_EXT = new Set(['.gif', '.webp']);
+const ANIMATED_FORMAT = new Set(['gif', 'webp']);
 
 function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
@@ -81,19 +96,108 @@ function clampInt(value, min, max, def) {
     return Math.min(max, Math.max(min, Math.round(n)));
 }
 
+// Merge with DEFAULTS and validate/clamp numeric inputs so a bad option can't
+// crash sharp or pass silently. Shared by the Gulp stream and compressBuffer().
+function normalizeOptions(options) {
+    const opts = { ...DEFAULTS, ...options };
+    opts.quality = clampInt(opts.quality, 1, 100, DEFAULTS.quality);
+    opts.pngEffort = clampInt(opts.pngEffort, 1, 10, DEFAULTS.pngEffort);
+    opts.maxWidth = Math.max(0, clampInt(opts.maxWidth, 0, Number.MAX_SAFE_INTEGER, 0));
+    opts.maxHeight = Math.max(0, clampInt(opts.maxHeight, 0, Number.MAX_SAFE_INTEGER, 0));
+    return opts;
+}
+
+// Build the sharp pipeline shared by both the Gulp stream and compressBuffer().
+function buildPipeline(input, format, opts, readAnimated) {
+    let pipeline = sharp(input, readAnimated ? { animated: true } : undefined);
+
+    // Auto-orient still images from EXIF BEFORE resize/encode. Without this,
+    // stripping metadata removes the orientation tag while pixels stay unrotated
+    // — making portrait photos display sideways. (Skip for animated inputs,
+    // where multi-frame rotation isn't supported.)
+    if (!readAnimated) {
+        pipeline = pipeline.rotate();
+    }
+
+    if (opts.maxWidth > 0 || opts.maxHeight > 0) {
+        pipeline = pipeline.resize({
+            width: opts.maxWidth || undefined,
+            height: opts.maxHeight || undefined,
+            fit: 'inside',
+            withoutEnlargement: true,
+        });
+    }
+
+    // Metadata: sharp strips by default. Keep all of it, or keep just the ICC
+    // colour profile (so wide-gamut images don't shift colour).
+    if (!opts.stripMetadata) {
+        pipeline = pipeline.keepMetadata();
+    } else if (opts.keepIccProfile) {
+        pipeline = pipeline.keepIccProfile();
+    }
+
+    switch (format) {
+        case 'jpeg':
+            pipeline = pipeline.jpeg({ quality: opts.quality, progressive: opts.progressive, mozjpeg: true });
+            break;
+        case 'png':
+            pipeline = pipeline.png({ quality: opts.quality, effort: opts.pngEffort, palette: true });
+            break;
+        case 'webp':
+            pipeline = pipeline.webp({ quality: opts.quality, effort: 4 });
+            break;
+        case 'avif':
+            pipeline = pipeline.avif({ quality: opts.quality, effort: 4, lossless: opts.avifLossless });
+            break;
+        case 'gif':
+            // sharp's GIF encoder takes `colours` (2-256), not `quality`.
+            pipeline = pipeline.gif({ colours: clampInt(2 + (opts.quality / 100) * 254, 2, 256, 256) });
+            break;
+    }
+
+    return pipeline;
+}
+
+/**
+ * Programmatic API — compress a single image Buffer outside of Gulp.
+ * Works in any Node script, serverless function, or other build tool.
+ *
+ * @param {Buffer} input - Raw image bytes (jpeg/png/webp/avif/gif/tiff)
+ * @param {CompressOptions} [options]
+ * @returns {Promise<{data: Buffer, format: string, originalSize: number, compressedSize: number, skipped: boolean}>}
+ */
+export async function compressBuffer(input, options = {}) {
+    if (!Buffer.isBuffer(input)) {
+        throw new TypeError(`${PLUGIN_NAME}: compressBuffer expects a Buffer`);
+    }
+    const opts = normalizeOptions(options);
+
+    const meta = await sharp(input).metadata();
+    const inputFormat = INPUT_FORMAT_MAP[meta.format];
+    const converting = opts.format && opts.format !== 'original';
+    if (!converting && !inputFormat) {
+        throw new Error(`${PLUGIN_NAME}: unsupported input format "${meta.format}"`);
+    }
+    const format = converting ? opts.format : inputFormat;
+    const readAnimated = ANIMATED_FORMAT.has(meta.format);
+
+    const data = await buildPipeline(input, format, opts, readAnimated).toBuffer();
+    const originalSize = input.length;
+
+    // Keep the original if re-encoding made it bigger (same-format only).
+    if (data.length >= originalSize && !converting) {
+        return { data: input, format, originalSize, compressedSize: originalSize, skipped: true };
+    }
+    return { data, format, originalSize, compressedSize: data.length, skipped: false };
+}
+
 /**
  * Main Gulp plugin function
  * @param {CompressOptions} options
  * @returns {NodeJS.ReadWriteStream}
  */
 export default function gulpSharpCompress(options = {}) {
-    const opts = { ...DEFAULTS, ...options };
-
-    // Validate / clamp numeric inputs so a bad option can't crash sharp or pass silently.
-    opts.quality = clampInt(opts.quality, 1, 100, DEFAULTS.quality);
-    opts.pngEffort = clampInt(opts.pngEffort, 1, 10, DEFAULTS.pngEffort);
-    opts.maxWidth = Math.max(0, clampInt(opts.maxWidth, 0, Number.MAX_SAFE_INTEGER, 0));
-    opts.maxHeight = Math.max(0, clampInt(opts.maxHeight, 0, Number.MAX_SAFE_INTEGER, 0));
+    const opts = normalizeOptions(options);
 
     let totalOriginal = 0;
     let totalCompressed = 0;
@@ -105,10 +209,8 @@ export default function gulpSharpCompress(options = {}) {
 
     return through2.obj(
         function (file, enc, cb) {
-            // Skip null/empty
             if (file.isNull()) return cb(null, file);
 
-            // No stream support
             if (file.isStream()) {
                 return cb(new PluginError(PLUGIN_NAME, 'Streaming not supported'));
             }
@@ -122,88 +224,14 @@ export default function gulpSharpCompress(options = {}) {
             const format = getOutputFormat(ext, opts.format);
             const readAnimated = ANIMATED_EXT.has(ext);
 
-            let pipeline = sharp(file.contents, readAnimated ? { animated: true } : undefined);
-
-            // Auto-orient still images from EXIF BEFORE resize/encode. Without this,
-            // stripping metadata below removes the orientation tag while pixels stay
-            // unrotated — making portrait photos display sideways. (Skip for animated
-            // inputs, where multi-frame rotation isn't supported.)
-            if (!readAnimated) {
-                pipeline = pipeline.rotate();
-            }
-
-            // Resize if specified
-            if (opts.maxWidth > 0 || opts.maxHeight > 0) {
-                pipeline = pipeline.resize({
-                    width: opts.maxWidth || undefined,
-                    height: opts.maxHeight || undefined,
-                    fit: 'inside',
-                    withoutEnlargement: true,
-                });
-            }
-
-            // Metadata: sharp strips by default. Keep all of it, or keep just the
-            // ICC colour profile (so wide-gamut images don't shift colour).
-            if (!opts.stripMetadata) {
-                pipeline = pipeline.keepMetadata();
-            } else if (opts.keepIccProfile) {
-                pipeline = pipeline.keepIccProfile();
-            }
-
-            // Apply format-specific encoding
-            switch (format) {
-                case 'jpeg':
-                    pipeline = pipeline.jpeg({
-                        quality: opts.quality,
-                        progressive: opts.progressive,
-                        mozjpeg: true, // Use mozjpeg encoder (same as TinyPNG)
-                    });
-                    break;
-
-                case 'png':
-                    pipeline = pipeline.png({
-                        quality: opts.quality,
-                        effort: opts.pngEffort,
-                        palette: true, // Palette-based quantization (pngquant-like)
-                    });
-                    break;
-
-                case 'webp':
-                    pipeline = pipeline.webp({
-                        quality: opts.quality,
-                        effort: 4,
-                    });
-                    break;
-
-                case 'avif':
-                    pipeline = pipeline.avif({
-                        quality: opts.quality,
-                        effort: 4,
-                        lossless: opts.avifLossless,
-                    });
-                    break;
-
-                case 'gif':
-                    // sharp's GIF encoder takes `colours` (2-256), not `quality`.
-                    // Map quality 1-100 onto the palette size so the option still has an effect.
-                    pipeline = pipeline.gif({
-                        colours: clampInt(2 + (opts.quality / 100) * 254, 2, 256, 256),
-                    });
-                    break;
-            }
-
-            pipeline.toBuffer()
+            buildPipeline(file.contents, format, opts, readAnimated).toBuffer()
                 .then((outputBuffer) => {
                     const compressedSize = outputBuffer.length;
 
                     // If compressed is larger, keep original (unless format changed)
                     if (compressedSize >= originalSize && opts.format === 'original') {
                         if (!opts.silent) {
-                            log(
-                                `${PLUGIN_NAME}:`,
-                                `${file.relative}`,
-                                `— skipped (already optimal)`
-                            );
+                            log(`${PLUGIN_NAME}:`, `${file.relative}`, `— skipped (already optimal)`);
                         }
                         return cb(null, file);
                     }
@@ -233,10 +261,7 @@ export default function gulpSharpCompress(options = {}) {
                     // Warn on output-path collisions (silent overwrite at gulp.dest)
                     if (seenOutPaths.has(file.path)) {
                         if (!opts.silent) {
-                            log(
-                                `${PLUGIN_NAME}:`,
-                                `⚠ ${path.basename(file.path)} collides with an earlier output and will overwrite it`
-                            );
+                            log(`${PLUGIN_NAME}:`, `⚠ ${path.basename(file.path)} collides with an earlier output and will overwrite it`);
                         }
                     } else {
                         seenOutPaths.add(file.path);
@@ -245,7 +270,6 @@ export default function gulpSharpCompress(options = {}) {
                     cb(null, file);
                 })
                 .catch((err) => {
-                    // Unreadable/corrupt input. Either fail the build or skip it.
                     if (opts.failOnError) {
                         return cb(new PluginError(PLUGIN_NAME, `${file.relative}: ${err.message}`));
                     }
@@ -256,7 +280,6 @@ export default function gulpSharpCompress(options = {}) {
                 });
         },
         function (cb) {
-            // Flush: show summary
             if (fileCount > 0 && !opts.silent) {
                 const totalReduction = Math.round((1 - totalCompressed / totalOriginal) * 100);
                 log(
