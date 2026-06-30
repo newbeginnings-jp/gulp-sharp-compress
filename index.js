@@ -13,14 +13,16 @@ const PLUGIN_NAME = 'gulp-sharp-compress';
 
 /**
  * @typedef {Object} CompressOptions
- * @property {number} [quality=80] - Compression quality 1-100
- * @property {'original'|'jpeg'|'webp'|'png'|'avif'} [format='original'] - Output format
+ * @property {number} [quality=80] - Compression quality 1-100 (clamped)
+ * @property {'original'|'jpeg'|'webp'|'png'|'avif'|'gif'} [format='original'] - Output format
  * @property {number} [maxWidth=0] - Max width in px (0 = no resize)
  * @property {number} [maxHeight=0] - Max height in px (0 = no resize)
  * @property {boolean} [progressive=true] - Progressive JPEG
- * @property {boolean} [stripMetadata=true] - Remove EXIF/metadata
+ * @property {boolean} [stripMetadata=true] - Remove EXIF/GPS/metadata (orientation is baked in first)
+ * @property {boolean} [keepIccProfile=false] - Keep the ICC colour profile even when stripping metadata
  * @property {number} [pngEffort=4] - PNG compression effort 1-10
  * @property {boolean} [avifLossless=false] - AVIF lossless mode
+ * @property {boolean} [failOnError=false] - Throw a PluginError on unreadable images instead of passing them through
  * @property {boolean} [silent=false] - Suppress log output
  */
 
@@ -31,8 +33,10 @@ const DEFAULTS = {
     maxHeight: 0,
     progressive: true,
     stripMetadata: true,
+    keepIccProfile: false,
     pngEffort: 4,
     avifLossless: false,
+    failOnError: false,
     silent: false,
 };
 
@@ -42,7 +46,7 @@ const FORMAT_MAP = {
     '.png': 'png',
     '.webp': 'webp',
     '.avif': 'avif',
-    '.gif': 'png', // GIF → PNG
+    '.gif': 'gif', // keep as GIF so animation is preserved (was flattened to PNG before)
     '.tiff': 'jpeg',
     '.tif': 'jpeg',
 };
@@ -52,7 +56,12 @@ const EXT_MAP = {
     png: '.png',
     webp: '.webp',
     avif: '.avif',
+    gif: '.gif',
 };
+
+// Inputs that may carry multiple frames — read with { animated: true } so we
+// don't silently drop all but the first frame.
+const ANIMATED_EXT = new Set(['.gif', '.webp']);
 
 function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
@@ -65,6 +74,13 @@ function getOutputFormat(ext, optionFormat) {
     return FORMAT_MAP[ext.toLowerCase()] || 'jpeg';
 }
 
+// Clamp a numeric option into [min, max]; fall back to `def` for non-numbers.
+function clampInt(value, min, max, def) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return def;
+    return Math.min(max, Math.max(min, Math.round(n)));
+}
+
 /**
  * Main Gulp plugin function
  * @param {CompressOptions} options
@@ -72,9 +88,20 @@ function getOutputFormat(ext, optionFormat) {
  */
 export default function gulpSharpCompress(options = {}) {
     const opts = { ...DEFAULTS, ...options };
+
+    // Validate / clamp numeric inputs so a bad option can't crash sharp or pass silently.
+    opts.quality = clampInt(opts.quality, 1, 100, DEFAULTS.quality);
+    opts.pngEffort = clampInt(opts.pngEffort, 1, 10, DEFAULTS.pngEffort);
+    opts.maxWidth = Math.max(0, clampInt(opts.maxWidth, 0, Number.MAX_SAFE_INTEGER, 0));
+    opts.maxHeight = Math.max(0, clampInt(opts.maxHeight, 0, Number.MAX_SAFE_INTEGER, 0));
+
     let totalOriginal = 0;
     let totalCompressed = 0;
     let fileCount = 0;
+    // Track emitted output paths so a format conversion that makes two sources
+    // collide (logo.png + logo.jpg -> logo.webp) warns instead of silently
+    // overwriting one of them at gulp.dest.
+    const seenOutPaths = new Set();
 
     return through2.obj(
         function (file, enc, cb) {
@@ -93,8 +120,17 @@ export default function gulpSharpCompress(options = {}) {
 
             const originalSize = file.contents.length;
             const format = getOutputFormat(ext, opts.format);
+            const readAnimated = ANIMATED_EXT.has(ext);
 
-            let pipeline = sharp(file.contents);
+            let pipeline = sharp(file.contents, readAnimated ? { animated: true } : undefined);
+
+            // Auto-orient still images from EXIF BEFORE resize/encode. Without this,
+            // stripping metadata below removes the orientation tag while pixels stay
+            // unrotated — making portrait photos display sideways. (Skip for animated
+            // inputs, where multi-frame rotation isn't supported.)
+            if (!readAnimated) {
+                pipeline = pipeline.rotate();
+            }
 
             // Resize if specified
             if (opts.maxWidth > 0 || opts.maxHeight > 0) {
@@ -106,9 +142,12 @@ export default function gulpSharpCompress(options = {}) {
                 });
             }
 
-            // Strip metadata (sharp strips by default; withMetadata(true) to keep)
+            // Metadata: sharp strips by default. Keep all of it, or keep just the
+            // ICC colour profile (so wide-gamut images don't shift colour).
             if (!opts.stripMetadata) {
-                pipeline = pipeline.withMetadata();
+                pipeline = pipeline.keepMetadata();
+            } else if (opts.keepIccProfile) {
+                pipeline = pipeline.keepIccProfile();
             }
 
             // Apply format-specific encoding
@@ -141,6 +180,14 @@ export default function gulpSharpCompress(options = {}) {
                         quality: opts.quality,
                         effort: 4,
                         lossless: opts.avifLossless,
+                    });
+                    break;
+
+                case 'gif':
+                    // sharp's GIF encoder takes `colours` (2-256), not `quality`.
+                    // Map quality 1-100 onto the palette size so the option still has an effect.
+                    pipeline = pipeline.gif({
+                        colours: clampInt(2 + (opts.quality / 100) * 254, 2, 256, 256),
                     });
                     break;
             }
@@ -183,10 +230,25 @@ export default function gulpSharpCompress(options = {}) {
                         file.path = file.path.replace(/\.[^.]+$/, EXT_MAP[format]);
                     }
 
+                    // Warn on output-path collisions (silent overwrite at gulp.dest)
+                    if (seenOutPaths.has(file.path)) {
+                        if (!opts.silent) {
+                            log(
+                                `${PLUGIN_NAME}:`,
+                                `⚠ ${path.basename(file.path)} collides with an earlier output and will overwrite it`
+                            );
+                        }
+                    } else {
+                        seenOutPaths.add(file.path);
+                    }
+
                     cb(null, file);
                 })
                 .catch((err) => {
-                    // Skip unsupported/corrupt files instead of crashing
+                    // Unreadable/corrupt input. Either fail the build or skip it.
+                    if (opts.failOnError) {
+                        return cb(new PluginError(PLUGIN_NAME, `${file.relative}: ${err.message}`));
+                    }
                     if (!opts.silent) {
                         log(`${PLUGIN_NAME}: ${file.relative} — skipped (${err.message})`);
                     }

@@ -1,6 +1,6 @@
 // Smoke tests for gulp-sharp-compress.
-// Generates a fixture image in-memory with sharp (no external fixtures),
-// pipes it through the plugin's streams, and asserts correct behavior.
+// Generates fixture images in-memory with sharp (no external fixtures),
+// pipes them through the plugin's streams, and asserts correct behavior.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
@@ -19,6 +19,14 @@ async function makeFixturePng() {
     }
   }
   return sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+}
+
+// A 200x100 landscape JPEG tagged orientation=6 (meant to display rotated 90°).
+async function makeOrientedJpeg() {
+  return sharp({ create: { width: 200, height: 100, channels: 3, background: { r: 200, g: 60, b: 60 } } })
+    .withMetadata({ orientation: 6 })
+    .jpeg()
+    .toBuffer();
 }
 
 function makeVinyl(buf, p) {
@@ -83,4 +91,55 @@ test('passes through unsupported extensions untouched', async () => {
   const out = await run(compress({ silent: true }), input, '/x/notes.txt');
   assert.deepEqual(out.contents, input, 'non-image content is left as-is');
   assert.equal(out.path.endsWith('.txt'), true);
+});
+
+test('auto-orients from EXIF so stripped portrait photos are not left sideways', async () => {
+  const input = await makeOrientedJpeg(); // 200x100, orientation=6
+  const out = await run(compress({ quality: 80, silent: true }), input, '/x/portrait.jpg');
+  const meta = await sharp(out.contents).metadata();
+  // .rotate() bakes the 90° rotation into the pixels -> dimensions swap to 100x200.
+  assert.equal(meta.width, 100, 'width becomes the short side after auto-orient');
+  assert.equal(meta.height, 200, 'height becomes the long side after auto-orient');
+  // And the orientation tag is no longer relied upon (normalized / stripped).
+  assert.ok(meta.orientation === undefined || meta.orientation === 1, 'orientation normalized');
+});
+
+test('keepMetadata + EXIF orientation does NOT double-rotate', async () => {
+  const input = await makeOrientedJpeg(); // 200x100, orientation=6
+  const out = await run(
+    compress({ quality: 80, silent: true, stripMetadata: false }),
+    input, '/x/portrait.jpg'
+  );
+  const meta = await sharp(out.contents).metadata();
+  // Pixels are baked-rotated to 100x200; the orientation tag must be normalized
+  // even though metadata is kept, or EXIF-aware viewers would rotate again.
+  assert.equal(meta.width, 100, 'short side after orient');
+  assert.equal(meta.height, 200, 'long side after orient');
+  assert.ok(
+    meta.orientation === undefined || meta.orientation === 1,
+    'orientation must be normalized even when keepMetadata is active'
+  );
+});
+
+test('failOnError: true surfaces a PluginError instead of silently passing through', async () => {
+  const corrupt = Buffer.from('\x89PNG not really a png');
+  await assert.rejects(
+    () => run(compress({ silent: true, failOnError: true }), corrupt, '/x/broken.png'),
+    /broken\.png/,
+    'stream should error and name the offending file'
+  );
+});
+
+test('failOnError defaults to false: corrupt input passes through unchanged', async () => {
+  const corrupt = Buffer.from('\x89PNG not really a png');
+  const out = await run(compress({ silent: true }), corrupt, '/x/broken.png');
+  assert.deepEqual(out.contents, corrupt, 'corrupt input is passed through untouched');
+});
+
+test('out-of-range quality is clamped, not crashed', async () => {
+  const input = await makeFixturePng();
+  const out = await run(jpeg({ quality: 999, silent: true }), input, '/x/grad.png'); // clamped to 100
+  assert.ok(out.contents.length > 0, 'still produces a valid JPEG');
+  assert.equal(out.contents[0], 0xff, 'JPEG SOI byte 1');
+  assert.equal(out.contents[1], 0xd8, 'JPEG SOI byte 2');
 });
